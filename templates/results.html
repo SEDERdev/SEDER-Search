@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Search Results</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #121212;
+            color: #e0e0e0;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            position: relative;
+        }
+        .top-left {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+        }
+        .top-left a {
+            text-decoration: none;
+            color: #e0e0e0;
+            font-size: 24px;
+            font-weight: bold;
+        }
+        .container {
+            max-width: 800px;
+            width: 100%;
+            background: #1e1e1e;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.5);
+        }
+        h1 {
+            text-align: center;
+            margin: 0;
+            margin-bottom: 20px;
+            font-size: 36px; /* Match size with index.html */
+        }
+        ul {
+            list-style-type: none;
+            padding: 0;
+        }
+        li {
+            margin-bottom: 20px;
+            padding: 10px;
+            background: #2c2c2c;
+            border: 1px solid #333;
+            border-radius: 4px;
+        }
+        li a {
+            text-decoration: none;
+            color: #FF6347; /* Tomato Red */
+            font-weight: bold;
+            font-size: 1.2em; /* Larger title text */
+        }
+        li a:hover {
+            text-decoration: underline;
+        }
+        li .url {
+            font-size: 0.7em;
+            color: #bbb;
+            margin-top: 4px; /* Reduce spacing between title and URL */
+        }
+        li p {
+            margin: 4px 0; /* Reduce spacing under paragraph text */
+        }
+        .pagination {
+            text-align: center;
+            margin-top: 20px;
+        }
+        .pagination a {
+            margin: 0 5px;
+            text-decoration: none;
+            color: #FF6347; /* Tomato Red */
+            font-weight: bold;
+        }
+        .pagination a:hover {
+            text-decoration: underline;
+        }
+        .pagination strong {
+            margin: 0 5px;
+            font-weight: bold;
+        }
+        .back-link {
+            margin-top: 20px;
+            text-align: right;
+            width: 100%;
+        }
+        .back-link a {
+            color: #FF6347; /* Tomato Red */
+            text-decoration: none;
+            font-weight: bold;
+        }
+        .back-link a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div class="top-left">
+        <a href="/">SEDER Search</a>
+    </div>
+    <div class="container">
+        <h1>Search Results</h1>
+        <ul>
+            {% for title, url, preview in results %}
+            <li>
+                <a href="{{ url }}">{{ title }}</a>
+                <p class="url">{{ url }}</p>
+                <p>{{ preview }}</p>
+            </li>
+            {% endfor %}
+        </ul>
+        <div class="pagination">
+            {% if page > 1 %}
+            <a href="{{ url_for('search_page', search_page_url=search_page_url, page=page-1) }}">Previous</a>
+            {% endif %}
+            {% for p in range(1, total_pages + 1) %}
+            {% if p == page %}
+            <strong>{{ p }}</strong>
+            {% else %}
+            <a href="{{ url_for('search_page', search_page_url=search_page_url, page=p) }}">{{ p }}</a>
+            {% endif %}
+            {% endfor %}
+            {% if page < total_pages %}
+            <a href="{{ url_for('search_page', search_page_url=search_page_url, page=page+1) }}">Next</a>
+            {% endif %}
+        </div>
+        <div class="back-link">
+            <a href="/">Back to Search Page</a>
+        </div>
+    </div>
+</body>
+</html>
