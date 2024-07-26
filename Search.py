@@ -5,12 +5,33 @@ import threading
 import os
 import time
 from sqlalchemy import create_engine, Column, Integer, String
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, scoped_session
+from sqlalchemy.orm import declarative_base, sessionmaker, scoped_session
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy import inspect
+import json
+import logging
+from logging.handlers import RotatingFileHandler
+import requests_cache
+
+# Set the base directory
+base_dir = os.path.abspath(os.path.dirname(__file__))
+
+# Configure logging
+log_file = os.path.join(base_dir, 'app.log')
+handler = RotatingFileHandler(log_file, maxBytes=10000, backupCount=1)
+handler.setLevel(logging.WARNING)
+formatter = logging.Formatter('%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]')
+handler.setFormatter(formatter)
+logger = logging.getLogger(__name__)
+logger.addHandler(handler)
+logger.setLevel(logging.WARNING)
+
+# Suppress SQLAlchemy info logs
+logging.getLogger('sqlalchemy.engine').setLevel(logging.WARNING)
 
 app = Flask(__name__, template_folder='templates')
+
+# Enable caching for HTTP requests
+requests_cache.install_cache('web_cache', expire_after=3600)
 
 # Global variables to store user search and related data
 your_search = ''
@@ -20,14 +41,19 @@ top_100 = []
 # Set the starting URL for the crawler
 Spider = "https://en.wikipedia.org/wiki/Spider"
 
-# Set the path to the SQLite database in the base folder
-base_dir = os.path.abspath(os.path.dirname(__file__))
-db_path = os.path.join(base_dir, 'web_crawler.db')
+# Set the path to the SQLite database and JSON file in the base folder
+db_path = os.getenv('WEB_CRAWLER_DB_PATH', os.path.join(base_dir, 'web_crawler.db'))
+json_path = os.getenv('WEB_CRAWLER_JSON_PATH', os.path.join(base_dir, 'click_data.json'))
 
 # Setup SQLAlchemy
 Base = declarative_base()
-engine = create_engine(f'sqlite:///{db_path}', echo=True)  # Enable SQLAlchemy logging
+engine = create_engine(f'sqlite:///{db_path}', echo=False)
 Session = scoped_session(sessionmaker(bind=engine))
+
+# Initialize the JSON data file
+if not os.path.exists(json_path):
+    with open(json_path, 'w') as f:
+        json.dump({}, f)
 
 # Define ignored words and punctuation
 IgnoredWords = set([
@@ -87,11 +113,7 @@ class Page(Base):
     clicks = Column(Integer, default=0)
     keyword_clicks = Column(String)
 
-def initialize_database():
-    """Initialize the SQLite database and tables if not already present."""
-    inspector = inspect(engine)
-    if not inspector.has_table(Page.__tablename__):
-        Base.metadata.create_all(engine)
+Base.metadata.create_all(engine)
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
@@ -118,12 +140,11 @@ def find_top_100():
     """Finds the top 100 relevant URLs based on keywords in the database."""
     global keywords
     global top_100
-    top_results = []
     top_tally = {}
 
     try:
         session = Session()
-        rows = session.query(Page).filter_by(processed='Yes').all()
+        rows = session.query(Page).filter(Page.processed == 'Yes').all()
 
         for row in rows:
             title, url = row.title, row.url
@@ -134,19 +155,24 @@ def find_top_100():
                             row.keyword_21, row.keyword_22, row.keyword_23, row.keyword_24, row.keyword_25,
                             row.keyword_26, row.keyword_27, row.keyword_28, row.keyword_29, row.keyword_30]
             score = 0
+            
+            keyword_clicks = json.loads(row.keyword_clicks) if row.keyword_clicks else {}
+
             for position, word in enumerate(row_keywords):
                 for keyword in keywords:
                     if word == keyword:
-                        # Full match
-                        score += (len(row_keywords) - position) * 1.0  # Full weight
+                        score += (len(row_keywords) - position) * 1.0
+                        score += keyword_clicks.get(keyword, 0) * 10
                     elif keyword in word:
-                        # Partial match
-                        score += (len(row_keywords) - position) * 0.1  # Partial weight
-            # Additional score for title match
+                        score += (len(row_keywords) - position) * 0.1
+                        score += keyword_clicks.get(keyword, 0) * 1
+
             title_lower = title.lower()
             for keyword in keywords:
                 if keyword in title_lower:
-                    score += 10  # Adjust the weight as needed
+                    score += 10
+
+            score += row.clicks * 5
 
             if score > 0:
                 top_tally[(title, url)] = score
@@ -154,7 +180,7 @@ def find_top_100():
         sorted_top_tally = dict(sorted(top_tally.items(), key=lambda item: item[1], reverse=True))
         top_100 = list(sorted_top_tally.keys())[:100]
     except Exception as e:
-        print(f"Database error: {e}")
+        logger.error(f"Database error: {e}")
     finally:
         session.close()
 
@@ -165,14 +191,12 @@ def fetch_first_paragraph(url):
         if response.status_code == 200:
             soup = BeautifulSoup(response.content, 'html.parser')
             
-            # Try to find the first meaningful paragraph
             paragraphs = soup.find_all('p')
             for paragraph in paragraphs:
                 text = paragraph.get_text().strip()
                 if len(text) > 0:
                     return text[:140] + '...' if len(text) > 140 else text
             
-            # If no meaningful paragraph found
             return "No meaningful paragraph found."
         else:
             return "Failed to retrieve content."
@@ -193,18 +217,60 @@ def search_page(search_page_url, page):
         preview = fetch_first_paragraph(url)
         results_with_previews.append((title, url, preview))
     
-    total_pages = (len(top_100) + 19) // 20  # Calculate total number of pages
+    total_pages = (len(top_100) + 19) // 20
     
     return render_template('results.html', results=results_with_previews, page=page, total_pages=total_pages, search_page_url=search_page_url)
+
+def update_json_file(url, keyword):
+    with open(json_path, 'r+') as f:
+        click_data = json.load(f)
+        if url not in click_data:
+            click_data[url] = {}
+        if keyword in click_data[url]:
+            click_data[url][keyword] += 1
+        else:
+            click_data[url][keyword] = 1
+        f.seek(0)
+        json.dump(click_data, f)
+        f.truncate()
+
+@app.route('/click/<int:page_id>/<keyword>')
+def record_click(page_id, keyword):
+    try:
+        session = Session()
+        page = session.query(Page).filter_by(id=page_id).first()
+        if page:
+            page.clicks += 1
+            
+            keyword_clicks = json.loads(page.keyword_clicks) if page.keyword_clicks else {}
+            keyword_clicks[keyword] = keyword_clicks.get(keyword, 0) + 1
+            page.keyword_clicks = json.dumps(keyword_clicks)
+            session.commit()
+            
+            update_json_file(page.url, keyword)
+        return redirect(request.referrer)
+    except Exception as e:
+        logger.error(f"Database error: {e}")
+    finally:
+        session.close()
+
+def initialize_database():
+    """Initialize the SQLite database and tables if not already present."""
+    Base.metadata.create_all(engine)
 
 def PatientZero(Spider):
     """Initialize the database with the starting URL if not already present."""
     session = Session()
-    if not session.query(Page).filter_by(url=Spider).first():
-        patient_zero = Page(title="", url=Spider, processed="No")
-        session.add(patient_zero)
-        session.commit()
-    session.close()
+    try:
+        if not session.query(Page).filter_by(url=Spider).first():
+            patient_zero = Page(title="", url=Spider, processed="No")
+            session.add(patient_zero)
+            session.commit()
+    except Exception as e:
+        logger.error(f"Error initializing PatientZero: {e}")
+        session.rollback()
+    finally:
+        session.close()
 
 def ExtractURLInfo(Url):
     """Extract title, text, and URLs from a given page."""
@@ -212,7 +278,7 @@ def ExtractURLInfo(Url):
         UrlRequest = requests.get(Url)
         UrlRequest.raise_for_status()
     except requests.RequestException as e:
-        print(f"Request failed: {e}")
+        logger.error(f"Request failed: {e}")
         return None, None, []
 
     Autopsy = BeautifulSoup(UrlRequest.content, 'html.parser')
@@ -240,27 +306,25 @@ def FindKeywords(Text):
         Keywords.append(keyword)
         Tally.pop(keyword)
 
-    # Pad the keywords list to ensure it always has 30 items
     while len(Keywords) < 30:
         Keywords.append('')
 
     return Keywords
 
 def clean_url(url):
-    # Strip any leading/trailing whitespace and remove quotes from URLs
     return url.strip().strip('"').strip("'")
 
 def FindURLs(ExtractedURLs, base_url):
     """Format extracted URLs to be complete links."""
     FullURLs = []
     for url in ExtractedURLs:
-        url = clean_url(url)  # Remove quotes from URLs
+        url = clean_url(url)
         if url.startswith('/'):
-            full_url = base_url + url
+            full_url = base_url.rstrip('/') + url  # Remove trailing slash from base_url
         elif url.startswith('http'):
             full_url = url
         else:
-            full_url = base_url + '/' + url
+            full_url = base_url.rstrip('/') + '/' + url  # Remove trailing slash from base_url
         FullURLs.append(full_url)
     return FullURLs
 
@@ -270,7 +334,6 @@ def PassDataToDatabase(Title, Url, Keywords, FullURLs):
         session = Session()
 
         with session.no_autoflush:
-            # Update the current page record
             page = session.query(Page).filter_by(url=Url).first()
             if page:
                 page.title = Title
@@ -282,22 +345,21 @@ def PassDataToDatabase(Title, Url, Keywords, FullURLs):
                 page.keyword_21, page.keyword_22, page.keyword_23, page.keyword_24, page.keyword_25 = Keywords[20:25]
                 page.keyword_26, page.keyword_27, page.keyword_28, page.keyword_29, page.keyword_30 = Keywords[25:30]
                 session.commit()
-                print(f"Updated page: {Url}")
+                # logger.info(f"Updated page: {Url}")  # Commented out to reduce terminal spam
             
-            # Insert new URLs into the database
             for full_url in FullURLs:
                 if not session.query(Page).filter_by(url=full_url).first():
                     new_page = Page(url=full_url, processed="No")
                     session.add(new_page)
                     try:
                         session.commit()
-                        print(f"Inserted new URL: {full_url}")
+                        # logger.info(f"Inserted new URL: {full_url}")  # Commented out to reduce terminal spam
                     except IntegrityError:
                         session.rollback()
-                        print(f"Duplicate URL found and ignored: {full_url}")
+                        # logger.info(f"Duplicate URL found and ignored: {full_url}")  # Commented out to reduce terminal spam
 
     except Exception as e:
-        print(f"Database error: {e}")
+        logger.error(f"Database error: {e}")
         session.rollback()
     finally:
         session.close()
@@ -310,14 +372,14 @@ def NewURL():
         while True:
             page = session.query(Page).filter_by(processed='No').first()
             if not page:
-                break  # Exit the loop if no URLs were found
+                break
 
             Url = clean_url(page.url)
             Title, Text, ExtractedURLs = ExtractURLInfo(Url)
             if Title is None:
                 page.processed = 'Error'
                 session.commit()
-                continue  # Skip if URL extraction failed
+                continue
 
             base_url = "/".join(Url.split("/")[:3])
             FullURLs = FindURLs(ExtractedURLs, base_url)
@@ -326,19 +388,96 @@ def NewURL():
 
         session.close()
     except Exception as e:
-        print(f"Database error: {e}")
+        logger.error(f"Database error: {e}")
 
 def start_crawling():
     """Start the web crawling process."""
     initialize_database()
     PatientZero(Spider)
     while True:
-        NewURL()
-        time.sleep(1)  # Sleep for a short while to prevent excessive CPU usage
+        if get_combined_size() < 25 * 1024 * 1024 * 1024:
+            NewURL()
+            time.sleep(1)
+        else:
+            logger.info("Combined size limit reached. Pausing for 5 days.")
+            time.sleep(5 * 24 * 3600)
+            clean_database()
+            repopulate_database()
+            logger.info("Resuming crawling after cleaning and repopulating the database.")
+
+def get_combined_size():
+    """Returns the combined size of the database and JSON data in bytes."""
+    db_size = os.path.getsize(db_path)
+    json_size = os.path.getsize(json_path)
+    return db_size + json_size
+
+def check_url_availability(url):
+    """Check if a URL is still available."""
+    try:
+        response = requests.get(url, timeout=10)
+        return response.status_code == 200
+    except requests.RequestException:
+        return False
+
+def clean_database():
+    """Clean the database by removing unavailable and least-used URLs."""
+    try:
+        session = Session()
+
+        pages = session.query(Page).all()
+        for page in pages:
+            if not check_url_availability(page.url):
+                session.delete(page)
+                session.commit()
+                remove_from_json(page.url)
+                logger.info(f"Deleted unavailable URL: {page.url}")
+
+        total_pages = session.query(Page).count()
+        least_used_count = total_pages // 5
+        least_used_pages = session.query(Page).order_by(Page.clicks).limit(least_used_count).all()
+        for page in least_used_pages:
+            session.delete(page)
+            session.commit()
+            remove_from_json(page.url)
+            logger.info(f"Deleted least-used URL: {page.url}")
+
+    except Exception as e:
+        logger.error(f"Database error: {e}")
+    finally:
+        session.close()
+
+def remove_from_json(url):
+    """Remove a URL from the JSON data."""
+    with open(json_path, 'r+') as f:
+        click_data = json.load(f)
+        if url in click_data:
+            del click_data[url]
+        f.seek(0)
+        json.dump(click_data, f)
+        f.truncate()
+
+def repopulate_database():
+    """Repopulate the database by crawling the most-used sites for new links."""
+    try:
+        session = Session()
+
+        most_used_pages = session.query(Page).order_by(Page.clicks.desc()).limit(100).all()
+        for page in most_used_pages:
+            Url = clean_url(page.url)
+            Title, Text, ExtractedURLs = ExtractURLInfo(Url)
+            if Title is None:
+                continue
+
+            base_url = "/".join(Url.split("/")[:3])
+            FullURLs = FindURLs(ExtractedURLs, base_url)
+            Keywords = FindKeywords(Text)
+            PassDataToDatabase(Title, Url, Keywords, FullURLs)
+
+    except Exception as e:
+        logger.error(f"Database error: {e}")
+    finally:
+        session.close()
 
 if __name__ == '__main__':
-    # Start the web crawling in a separate thread
     threading.Thread(target=start_crawling).start()
-    
-    # Run the Flask web application
     app.run()
