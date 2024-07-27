@@ -44,6 +44,9 @@
             color: #e0e0e0;
             font-size: 16px;
         }
+        input[type="text"]::placeholder {
+            color: #888;
+        }
         button {
             padding: 10px 20px;
             background: #007BFF;
@@ -60,8 +63,8 @@
 <body>
     <div class="container">
         <h1>SEDER Search</h1>
-        <form method="POST">
-            <input type="text" name="YourSearch" placeholder="Enter your search query">
+        <form method="POST" autocomplete="off">
+            <input type="text" name="YourSearch" placeholder="Enter your search query" autocomplete="off">
             <button type="submit">Search</button>
         </form>
     </div>
