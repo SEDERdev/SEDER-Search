@@ -479,5 +479,11 @@ def repopulate_database():
         session.close()
 
 if __name__ == '__main__':
-    threading.Thread(target=start_crawling).start()
+    # Start the crawler thread
+    threading.Thread(target=start_crawling, daemon=True).start()
+
+    # Start the Flask app
     app.run()
+else:
+    # Start the crawler thread when the app is started by gunicorn
+    threading.Thread(target=start_crawling, daemon=True).start()
