@@ -12,6 +12,7 @@ import json
 import logging
 from logging.handlers import RotatingFileHandler
 import requests_cache
+import requests
 
 # Set the base directory
 base_dir = os.path.abspath(os.path.dirname(__file__))
@@ -424,9 +425,12 @@ def get_combined_size():
 def check_url_availability(url):
     """Check if a URL is still available."""
     try:
-        response = requests.get(url, timeout=10)
+        response = requests.head(url, timeout=10)
+        if response.status_code == 405:  # Method not allowed
+            response = requests.get(url, timeout=10)
         return response.status_code == 200
-    except requests.RequestException:
+    except requests.RequestException as e:
+        print(f"Error checking URL {url}: {e}")
         return False
 
 def clean_database():
