@@ -1,10 +1,11 @@
 from flask import Flask, render_template, request, redirect, url_for
-import requests
+import aiohttp
+import asyncio
 from bs4 import BeautifulSoup
 import threading
 import os
 import time
-from sqlalchemy import create_engine, Column, Integer, String
+from sqlalchemy import create_engine, Column, Integer, String, Index
 from sqlalchemy.orm import declarative_base, sessionmaker, scoped_session
 from sqlalchemy.exc import IntegrityError
 import json
@@ -47,7 +48,7 @@ json_path = os.getenv('WEB_CRAWLER_JSON_PATH', os.path.join(base_dir, 'click_dat
 
 # Setup SQLAlchemy
 Base = declarative_base()
-engine = create_engine(f'sqlite:///{db_path}', echo=False)
+engine = create_engine(f'sqlite:///{db_path}', echo=False, pool_size=5, max_overflow=10)
 Session = scoped_session(sessionmaker(bind=engine))
 
 # Initialize the JSON data file
@@ -78,8 +79,8 @@ class Page(Base):
     __tablename__ = 'pages'
     id = Column(Integer, primary_key=True)
     title = Column(String)
-    url = Column(String, unique=True)
-    processed = Column(String)
+    url = Column(String, unique=True, index=True)
+    processed = Column(String, index=True)
     keyword_1 = Column(String)
     keyword_2 = Column(String)
     keyword_3 = Column(String)
@@ -110,8 +111,11 @@ class Page(Base):
     keyword_28 = Column(String)
     keyword_29 = Column(String)
     keyword_30 = Column(String)
-    clicks = Column(Integer, default=0)
+    clicks = Column(Integer, default=0, index=True)
     keyword_clicks = Column(String)
+
+Index('idx_processed', Page.processed)
+Index('idx_clicks', Page.clicks)
 
 Base.metadata.create_all(engine)
 
@@ -184,23 +188,25 @@ def find_top_100():
     finally:
         session.close()
 
-def fetch_first_paragraph(url):
+async def fetch_first_paragraph(url):
     """Fetches the first paragraph from the given URL."""
     try:
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.content, 'html.parser')
-            
-            paragraphs = soup.find_all('p')
-            for paragraph in paragraphs:
-                text = paragraph.get_text().strip()
-                if len(text) > 0:
-                    return text[:140] + '...' if len(text) > 140 else text
-            
-            return "No meaningful paragraph found."
-        else:
-            return "Failed to retrieve content."
-    except requests.RequestException:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=10) as response:
+                if response.status == 200:
+                    content = await response.text()
+                    soup = BeautifulSoup(content, 'html.parser')
+                    
+                    paragraphs = soup.find_all('p')
+                    for paragraph in paragraphs:
+                        text = paragraph.get_text().strip()
+                        if len(text) > 0:
+                            return text[:140] + '...' if len(text) > 140 else text
+                    
+                    return "No meaningful paragraph found."
+                else:
+                    return "Failed to retrieve content."
+    except aiohttp.ClientError:
         return "Failed to retrieve content."
 
 @app.route('/Search/<search_page_url>/<int:page>')
@@ -213,8 +219,12 @@ def search_page(search_page_url, page):
     end = start + 20
     paginated_results = top_100[start:end]
     
-    for title, url in paginated_results:
-        preview = fetch_first_paragraph(url)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    tasks = [fetch_first_paragraph(url) for _, url in paginated_results]
+    previews = loop.run_until_complete(asyncio.gather(*tasks))
+    
+    for (title, url), preview in zip(paginated_results, previews):
         results_with_previews.append((title, url, preview))
     
     total_pages = (len(top_100) + 19) // 20
@@ -272,21 +282,24 @@ def PatientZero(Spider):
     finally:
         session.close()
 
-def ExtractURLInfo(Url):
+async def ExtractURLInfo(Url):
     """Extract title, text, and URLs from a given page."""
     try:
-        UrlRequest = requests.get(Url)
-        UrlRequest.raise_for_status()
-    except requests.RequestException as e:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(Url) as response:
+                if response.status != 200:
+                    logger.error(f"Request failed with status {response.status}: {Url}")
+                    return None, None, []
+                content = await response.text()
+                Autopsy = BeautifulSoup(content, 'html.parser')
+                Title = Autopsy.title.string.strip() if Autopsy.title else 'No Title'
+                MessyText = Autopsy.find_all('p')
+                Text = '\n'.join(p.get_text() for p in MessyText)
+                ExtractedURLs = [a['href'] for a in Autopsy.find_all('a', href=True)]
+                return Title, Text, ExtractedURLs
+    except aiohttp.ClientError as e:
         logger.error(f"Request failed: {e}")
         return None, None, []
-
-    Autopsy = BeautifulSoup(UrlRequest.content, 'html.parser')
-    Title = Autopsy.title.string.strip() if Autopsy.title else 'No Title'
-    MessyText = Autopsy.find_all('p')
-    Text = '\n'.join(p.get_text() for p in MessyText)
-    ExtractedURLs = [a['href'] for a in Autopsy.find_all('a', href=True)]
-    return Title, Text, ExtractedURLs
 
 def FindKeywords(Text):
     """Identify the top 30 keywords from the text."""
@@ -345,7 +358,6 @@ def PassDataToDatabase(Title, Url, Keywords, FullURLs):
                 page.keyword_21, page.keyword_22, page.keyword_23, page.keyword_24, page.keyword_25 = Keywords[20:25]
                 page.keyword_26, page.keyword_27, page.keyword_28, page.keyword_29, page.keyword_30 = Keywords[25:30]
                 session.commit()
-                # logger.info(f"Updated page: {Url}")  # Commented out to reduce terminal spam
             
             for full_url in FullURLs:
                 if not session.query(Page).filter_by(url=full_url).first():
@@ -353,10 +365,8 @@ def PassDataToDatabase(Title, Url, Keywords, FullURLs):
                     session.add(new_page)
                     try:
                         session.commit()
-                        # logger.info(f"Inserted new URL: {full_url}")  # Commented out to reduce terminal spam
                     except IntegrityError:
                         session.rollback()
-                        # logger.info(f"Duplicate URL found and ignored: {full_url}")  # Commented out to reduce terminal spam
 
     except Exception as e:
         logger.error(f"Database error: {e}")
@@ -364,7 +374,7 @@ def PassDataToDatabase(Title, Url, Keywords, FullURLs):
     finally:
         session.close()
 
-def NewURL():
+async def NewURL():
     """Process new URLs from the database sequentially and extract their information."""
     try:
         session = Session()
@@ -375,7 +385,7 @@ def NewURL():
                 break
 
             Url = clean_url(page.url)
-            Title, Text, ExtractedURLs = ExtractURLInfo(Url)
+            Title, Text, ExtractedURLs = await ExtractURLInfo(Url)
             if Title is None:
                 page.processed = 'Error'
                 session.commit()
@@ -396,8 +406,8 @@ def start_crawling():
     PatientZero(Spider)
     while True:
         if get_combined_size() < 25 * 1024 * 1024 * 1024:
-            NewURL()
-            time.sleep(1)
+            asyncio.run(NewURL())
+            time.sleep(300)
         else:
             logger.info("Combined size limit reached. Pausing for 5 days.")
             time.sleep(5 * 24 * 3600)
@@ -464,7 +474,7 @@ def repopulate_database():
         most_used_pages = session.query(Page).order_by(Page.clicks.desc()).limit(100).all()
         for page in most_used_pages:
             Url = clean_url(page.url)
-            Title, Text, ExtractedURLs = ExtractURLInfo(Url)
+            Title, Text, ExtractedURLs = asyncio.run(ExtractURLInfo(Url))
             if Title is None:
                 continue
 
