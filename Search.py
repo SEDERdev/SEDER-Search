@@ -49,7 +49,7 @@ json_path = os.getenv('WEB_CRAWLER_JSON_PATH', os.path.join(base_dir, 'click_dat
 
 # Setup SQLAlchemy
 Base = declarative_base()
-engine = create_engine(f'sqlite:///{db_path}', echo=False, pool_size=5, max_overflow=10)
+engine = create_engine(f'sqlite:///{db_path}', echo=False)
 Session = scoped_session(sessionmaker(bind=engine))
 
 # Initialize the JSON data file
